@@ -1,53 +1,69 @@
-import { describe, expect, it } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
-  ARENA_HALF,
-  PICKUP_RADIUS,
   clamp,
-  clampToArena,
-  collides,
-  dist2,
-  randomOrbPosition,
+  createKnife,
+  updateKnife,
+  checkSlice,
+  GROUND_Y,
 } from "./logic";
 
 describe("clamp", () => {
-  it("bounds a value within the range", () => {
-    expect(clamp(5, 0, 10)).toBe(5);
-    expect(clamp(-3, 0, 10)).toBe(0);
-    expect(clamp(99, 0, 10)).toBe(10);
+  it("clamps below min", () => expect(clamp(-5, 0, 10)).toBe(0));
+  it("clamps above max", () => expect(clamp(15, 0, 10)).toBe(10));
+  it("returns value in range", () => expect(clamp(5, 0, 10)).toBe(5));
+});
+
+describe("createKnife", () => {
+  it("starts at ground level", () => {
+    const k = createKnife();
+    expect(k.y).toBe(GROUND_Y);
+    expect(k.grounded).toBe(true);
   });
 });
 
-describe("collides", () => {
-  it("detects a touch inside the pickup radius", () => {
-    expect(collides(0, 0, 0.5, 0.5)).toBe(true);
+describe("updateKnife", () => {
+  it("moves forward", () => {
+    const k = createKnife();
+    const updated = updateKnife(k, 1, false);
+    expect(updated.z).toBeLessThan(k.z);
   });
-  it("misses when farther than the radius", () => {
-    expect(collides(0, 0, 5, 5)).toBe(false);
-  });
-  it("is inclusive at exactly the radius edge", () => {
-    expect(collides(0, 0, PICKUP_RADIUS, 0)).toBe(true);
+
+  it("jumps when grounded", () => {
+    const k = createKnife();
+    const updated = updateKnife(k, 0.016, true);
+    expect(updated.vy).toBeGreaterThan(0);
+    expect(updated.grounded).toBe(false);
   });
 });
 
-describe("clampToArena", () => {
-  it("keeps out-of-bounds points inside the arena", () => {
-    expect(clampToArena(100, -100)).toEqual([ARENA_HALF, -ARENA_HALF]);
+describe("checkSlice", () => {
+  it("detects collision", () => {
+    const k = createKnife();
+    const target = {
+      id: 0,
+      x: 0,
+      y: GROUND_Y,
+      z: 0,
+      type: "apple" as const,
+      sliced: false,
+      sliceAnim: 0,
+      scale: 1,
+    };
+    expect(checkSlice(k, target)).toBe(true);
   });
-});
 
-describe("randomOrbPosition", () => {
-  it("never spawns within minDist of the avoid point", () => {
-    // A deterministic PRNG: the first (0.5, 0.5) draw lands on the player at
-    // origin and must be rejected; the next draw is accepted.
-    const seq = [0.5, 0.5, 0.95, 0.05, 0.2, 0.8];
-    let i = 0;
-    const rand = () => seq[i++ % seq.length]!;
-    const [x, z] = randomOrbPosition(0, 0, ARENA_HALF, 4, rand);
-    expect(dist2(x, z, 0, 0)).toBeGreaterThanOrEqual(16);
-  });
-  it("stays within the arena bounds", () => {
-    const [x, z] = randomOrbPosition(0, 0);
-    expect(Math.abs(x)).toBeLessThanOrEqual(ARENA_HALF);
-    expect(Math.abs(z)).toBeLessThanOrEqual(ARENA_HALF);
+  it("ignores already sliced", () => {
+    const k = createKnife();
+    const target = {
+      id: 0,
+      x: 0,
+      y: GROUND_Y,
+      z: 0,
+      type: "apple" as const,
+      sliced: true,
+      sliceAnim: 1,
+      scale: 1,
+    };
+    expect(checkSlice(k, target)).toBe(false);
   });
 });

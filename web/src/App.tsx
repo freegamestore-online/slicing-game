@@ -1,35 +1,41 @@
-import { useRef, useState } from "react";
+import { useState, useCallback } from "react";
 import { GameShell, GameTopbar, GameOverScreen } from "@freegamestore/games";
 import { Game } from "./components/Game";
 import { useHighScore } from "./hooks/useHighScore";
-import { ROUND_SECONDS } from "./lib/logic";
 import type { GamePhase } from "./types";
 
 export default function App() {
   const [phase, setPhase] = useState<GamePhase>("menu");
   const [score, setScore] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(ROUND_SECONDS);
-  // Bumping `round` remounts <Game> so each play starts from a clean state.
+  const [distance, setDistance] = useState(0);
+  const [combo, setCombo] = useState(0);
   const [round, setRound] = useState(0);
-  const [highScore, setHighScore] = useHighScore("Slicing-highscore");
+  const [highScore, setHighScore] = useHighScore("slicing-game-highscore");
 
-  // The final score is read from a ref at game-over so it isn't stale in the
-  // callback closure (score state updates asynchronously during play).
-  const scoreRef = useRef(0);
-  const handleScore = (s: number) => { scoreRef.current = s; setScore(s); };
-
-  const start = () => {
-    scoreRef.current = 0;
+  const start = useCallback(() => {
     setScore(0);
-    setTimeLeft(ROUND_SECONDS);
+    setDistance(0);
+    setCombo(0);
     setRound((r) => r + 1);
     setPhase("playing");
-  };
+  }, []);
 
-  const end = () => {
-    setHighScore(scoreRef.current);
+  const handleScore = useCallback((s: number) => {
+    setScore(s);
+  }, []);
+
+  const handleDistance = useCallback((d: number) => {
+    setDistance(d);
+  }, []);
+
+  const handleCombo = useCallback((c: number) => {
+    setCombo(c);
+  }, []);
+
+  const handleGameOver = useCallback(() => {
     setPhase("over");
-  };
+    setHighScore(score);
+  }, [score, setHighScore]);
 
   return (
     <GameShell
@@ -38,39 +44,114 @@ export default function App() {
           title="Slicing"
           stats={[
             { label: "Score", value: score, accent: true },
-            { label: "Time", value: `${timeLeft}s` },
+            { label: "Distance", value: `${distance}m` },
+            ...(combo > 1
+              ? [{ label: "Combo", value: `x${combo}` }]
+              : []),
             { label: "Best", value: highScore },
           ]}
         />
       }
     >
-      <div className="relative w-full h-full min-h-[400px]">
-        {phase !== "menu" && (
-          <Game key={round} onScore={handleScore} onTime={setTimeLeft} onGameOver={end} />
-        )}
+      {phase === "menu" && (
+        <div className="flex flex-col items-center justify-center h-full gap-6 px-4">
+          <h1
+            className="text-5xl md:text-7xl font-bold text-center"
+            style={{ fontFamily: "Fraunces, serif", color: "var(--ink)" }}
+          >
+            🔪 Slicing
+          </h1>
+          <p
+            className="text-lg md:text-xl text-center max-w-md"
+            style={{ color: "var(--muted)" }}
+          >
+            Jump and slice through fruits as your knife flies forward!
+            Avoid the bombs!
+          </p>
 
-        {phase === "menu" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-center gap-5 px-6" style={{ background: "#0f172a" }}>
-            <h1 className="text-3xl font-bold" style={{ color: "#f8fafc" }}>Slicing</h1>
-            <p className="max-w-sm" style={{ color: "#94a3b8" }}>
-              Move with <b>WASD / arrow keys</b> (or the on-screen pad on mobile).
-              Grab as many orbs as you can before the clock runs out.
+          <div
+            className="text-sm text-center max-w-sm space-y-1"
+            style={{ color: "var(--muted)" }}
+          >
+            <p>
+              <strong>Desktop:</strong> Space/↑ to jump · ←/→ to switch lanes
             </p>
-            <button
-              onClick={start}
-              className="font-semibold rounded-xl"
-              style={{ minHeight: 48, padding: "0 2rem", background: "#22d3ee", color: "#083344", border: "none", cursor: "pointer", fontSize: "1.05rem" }}
-            >
-              Play
-            </button>
-            {highScore > 0 && <p className="text-sm" style={{ color: "#64748b" }}>Best: {highScore}</p>}
+            <p>
+              <strong>Mobile:</strong> Tap to jump · Swipe left/right to switch lanes
+            </p>
           </div>
-        )}
 
-        {phase === "over" && (
-          <GameOverScreen score={score} highScore={highScore} onPlayAgain={start} />
-        )}
-      </div>
+          <button
+            onClick={start}
+            className="px-8 py-4 rounded-xl text-xl font-bold text-white transition-transform active:scale-95"
+            style={{
+              background: "var(--accent)",
+              minWidth: "200px",
+              minHeight: "56px",
+            }}
+          >
+            Start Slicing!
+          </button>
+
+          {highScore > 0 && (
+            <p style={{ color: "var(--muted)" }}>
+              Best Score: <strong style={{ color: "var(--ink)" }}>{highScore}</strong>
+            </p>
+          )}
+        </div>
+      )}
+
+      {phase === "playing" && (
+        <div className="w-full h-full relative">
+          <Game
+            key={round}
+            onScore={handleScore}
+            onDistance={handleDistance}
+            onGameOver={handleGameOver}
+            onCombo={handleCombo}
+          />
+
+          {/* Mobile jump button */}
+          <div className="absolute bottom-4 left-0 right-0 flex justify-center pointer-events-none md:hidden">
+            <div
+              className="text-xs text-center px-4 py-2 rounded-full"
+              style={{
+                background: "var(--glass)",
+                color: "var(--muted)",
+                backdropFilter: "blur(8px)",
+              }}
+            >
+              Tap to jump · Swipe to change lanes
+            </div>
+          </div>
+
+          {/* Combo display */}
+          {combo > 1 && (
+            <div
+              className="absolute top-2 left-1/2 -translate-x-1/2 text-2xl font-bold animate-pulse"
+              style={{
+                color: combo >= 5 ? "#ffd700" : combo >= 3 ? "#ff8c00" : "var(--accent)",
+                fontFamily: "Fraunces, serif",
+                textShadow: "0 2px 8px rgba(0,0,0,0.3)",
+              }}
+            >
+              {combo}x COMBO!
+            </div>
+          )}
+        </div>
+      )}
+
+      {phase === "over" && (
+        <GameOverScreen
+          score={score}
+          highScore={highScore}
+          onRestart={start}
+          stats={[
+            { label: "Distance", value: `${distance}m` },
+            { label: "Score", value: score },
+          ]}
+        />
+      )}
     </GameShell>
   );
 }
