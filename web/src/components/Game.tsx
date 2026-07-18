@@ -1,735 +1,547 @@
-import { useEffect, useRef, useCallback, useMemo } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { useEffect, useRef, useCallback } from "react";
+import { Canvas, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { useGameSounds } from "@freegamestore/games";
-import type { KnifeState, SliceTarget } from "../types";
-import { TARGET_COLORS, TARGET_POINTS } from "../types";
+import type { BeatNote, HitEffect, HitQuality } from "../types";
 import {
-  createKnife,
-  updateKnife,
-  checkSlice,
-  spawnTargets,
-  cleanupTargets,
-  FORWARD_SPEED,
-  LANES,
-  GROUND_Y,
+  LANE_COUNT,
+  HIT_ZONE_Y,
+  NOTE_SPAWN_Y,
+  fallSpeed,
+  tryHit,
+  updateNote,
+  generateNotes,
+  cleanupNotes,
+  comboMultiplier,
+  POINTS,
+  starRating,
 } from "../lib/logic";
 
 export interface GameProps {
+  bpm: number;
+  level: number;
+  songDuration: number;
   onScore: (score: number) => void;
-  onDistance: (d: number) => void;
-  onGameOver: () => void;
-  onCombo: (c: number) => void;
+  onCombo: (combo: number) => void;
+  onHit: (quality: HitQuality) => void;
+  onGameOver: (stars: number, accuracy: number) => void;
 }
 
-/* ── Knife Mesh ──────────────────────────────────────────── */
-function KnifeMesh({ knifeRef }: { knifeRef: React.RefObject<KnifeState> }) {
-  const groupRef = useRef<THREE.Group>(null);
+/* ─── Constants ─────────────────────────────────────────── */
 
-  useFrame(() => {
-    const g = groupRef.current;
-    const k = knifeRef.current;
-    if (!g || !k) return;
-    g.position.set(k.x, k.y, k.z);
-    g.rotation.x = k.rotation;
-  });
+const LANE_COLORS = ["#ff4d8d", "#4daaff", "#ffe14d", "#4dff99"];
+const LANE_X = [-4.5, -1.5, 1.5, 4.5];
 
-  return (
-    <group ref={groupRef}>
-      {/* Blade */}
-      <mesh position={[0, 0.4, 0]} castShadow>
-        <boxGeometry args={[0.12, 1.6, 0.5]} />
-        <meshStandardMaterial color="#c0c0c0" metalness={0.9} roughness={0.2} />
-      </mesh>
-      {/* Blade edge highlight */}
-      <mesh position={[0, 0.4, -0.25]}>
-        <boxGeometry args={[0.06, 1.6, 0.02]} />
-        <meshStandardMaterial color="#ffffff" metalness={1} roughness={0.1} />
-      </mesh>
-      {/* Handle */}
-      <mesh position={[0, -0.5, 0]} castShadow>
-        <boxGeometry args={[0.18, 0.7, 0.35]} />
-        <meshStandardMaterial color="#5a3825" roughness={0.8} />
-      </mesh>
-      {/* Handle wrap */}
-      <mesh position={[0, -0.5, 0]}>
-        <boxGeometry args={[0.2, 0.15, 0.36]} />
-        <meshStandardMaterial color="#8B4513" roughness={0.7} />
-      </mesh>
-    </group>
-  );
-}
+/* ─── Lane Tracks ────────────────────────────────────────── */
 
-/* ── Sliceable Target ────────────────────────────────────── */
-function TargetMesh({ target }: { target: SliceTarget }) {
-  const groupRef = useRef<THREE.Group>(null);
-  const colors = TARGET_COLORS[target.type];
+function LaneTracks({ flashRef }: { flashRef: React.RefObject<number[]> }) {
+  const matRefs = useRef<(THREE.MeshStandardMaterial | null)[]>([null, null, null, null]);
 
   useFrame((_state, dt) => {
-    const g = groupRef.current;
-    if (!g) return;
-
-    if (target.sliced) {
-      // Animate split
-      target.sliceAnim = Math.min(target.sliceAnim + dt * 3, 1);
-    }
-
-    // Gentle bob for floating targets
-    if (!target.sliced && target.y > 1.0) {
-      g.position.y = target.y + Math.sin(Date.now() * 0.003 + target.id) * 0.15;
-    } else if (!target.sliced) {
-      g.position.y = target.y;
+    const flashes = flashRef.current;
+    if (!flashes) return;
+    for (let i = 0; i < LANE_COUNT; i++) {
+      flashes[i] = Math.max(0, (flashes[i] ?? 0) - dt * 3);
+      const mat = matRefs.current[i];
+      if (mat) {
+        const f = flashes[i] ?? 0;
+        mat.emissiveIntensity = f * 1.2;
+        mat.opacity = 0.18 + f * 0.35;
+      }
     }
   });
 
-  const isBomb = target.type === "bomb";
-  const isLog = target.type === "log";
-
-  if (target.sliced && target.sliceAnim >= 0.95) return null;
+  const trackHeight = NOTE_SPAWN_Y - HIT_ZONE_Y + 2;
+  const midY = (NOTE_SPAWN_Y + HIT_ZONE_Y) / 2;
 
   return (
-    <group
-      ref={groupRef}
-      position={[target.x, target.y, target.z]}
-      scale={target.scale}
-    >
-      {target.sliced ? (
-        <>
-          {/* Left half */}
-          <group
-            position={[-target.sliceAnim * 1.2, -target.sliceAnim * 0.5, 0]}
-            rotation={[0, 0, target.sliceAnim * 0.8]}
-          >
-            <mesh>
-              <sphereGeometry args={[0.5, 12, 12, 0, Math.PI]} />
-              <meshStandardMaterial color={colors.inner} />
+    <group>
+      {LANE_X.map((x, i) => {
+        const color = LANE_COLORS[i]!;
+        return (
+          <group key={i}>
+            <mesh position={[x, midY, -0.3]}>
+              <planeGeometry args={[1.6, trackHeight]} />
+              <meshStandardMaterial
+                ref={(m) => { matRefs.current[i] = m; }}
+                color={color}
+                emissive={color}
+                emissiveIntensity={0}
+                transparent
+                opacity={0.18}
+                side={THREE.DoubleSide}
+              />
             </mesh>
-            <mesh>
-              <sphereGeometry args={[0.52, 12, 12, Math.PI, Math.PI]} />
-              <meshStandardMaterial color={colors.outer} />
+            <mesh position={[x - 0.8, midY, -0.25]}>
+              <planeGeometry args={[0.04, trackHeight]} />
+              <meshStandardMaterial color={color} transparent opacity={0.4} side={THREE.DoubleSide} />
             </mesh>
-          </group>
-          {/* Right half */}
-          <group
-            position={[target.sliceAnim * 1.2, -target.sliceAnim * 0.5, 0]}
-            rotation={[0, 0, -target.sliceAnim * 0.8]}
-          >
-            <mesh>
-              <sphereGeometry args={[0.5, 12, 12, Math.PI, Math.PI]} />
-              <meshStandardMaterial color={colors.inner} />
-            </mesh>
-            <mesh>
-              <sphereGeometry args={[0.52, 12, 12, 0, Math.PI]} />
-              <meshStandardMaterial color={colors.outer} />
+            <mesh position={[x + 0.8, midY, -0.25]}>
+              <planeGeometry args={[0.04, trackHeight]} />
+              <meshStandardMaterial color={color} transparent opacity={0.4} side={THREE.DoubleSide} />
             </mesh>
           </group>
-        </>
-      ) : isBomb ? (
-        <group>
-          <mesh castShadow>
-            <sphereGeometry args={[0.5, 16, 16]} />
-            <meshStandardMaterial color={colors.outer} />
-          </mesh>
-          {/* Fuse */}
-          <mesh position={[0, 0.55, 0]}>
-            <cylinderGeometry args={[0.03, 0.03, 0.3]} />
-            <meshStandardMaterial color="#888" />
-          </mesh>
-          {/* Spark */}
-          <mesh position={[0, 0.72, 0]}>
-            <sphereGeometry args={[0.06, 8, 8]} />
-            <meshStandardMaterial
-              color="#ff6600"
-              emissive="#ff4400"
-              emissiveIntensity={2}
-            />
-          </mesh>
-        </group>
-      ) : isLog ? (
-        <group rotation={[0, 0, Math.PI / 2]}>
-          <mesh castShadow>
-            <cylinderGeometry args={[0.45, 0.45, 1.2, 12]} />
-            <meshStandardMaterial color={colors.outer} />
-          </mesh>
-          {/* End rings */}
-          <mesh position={[0, 0.61, 0]}>
-            <circleGeometry args={[0.44, 12]} />
-            <meshStandardMaterial color={colors.inner} side={THREE.DoubleSide} />
-          </mesh>
-        </group>
-      ) : (
-        <group>
-          <mesh castShadow>
-            <sphereGeometry args={[0.55, 16, 16]} />
-            <meshStandardMaterial color={colors.outer} />
-          </mesh>
-          {/* Leaf/stem */}
-          {target.type !== "pineapple" && (
-            <mesh position={[0, 0.5, 0]}>
-              <coneGeometry args={[0.08, 0.2, 6]} />
-              <meshStandardMaterial color="#2d5a27" />
-            </mesh>
-          )}
-          {target.type === "pineapple" && (
-            <group position={[0, 0.55, 0]}>
-              <mesh>
-                <coneGeometry args={[0.15, 0.4, 6]} />
-                <meshStandardMaterial color="#228B22" />
-              </mesh>
-              <mesh position={[0.1, 0.1, 0]} rotation={[0, 0, 0.3]}>
-                <coneGeometry args={[0.08, 0.25, 4]} />
-                <meshStandardMaterial color="#32CD32" />
-              </mesh>
-            </group>
-          )}
-        </group>
-      )}
+        );
+      })}
     </group>
   );
 }
 
-/* ── Ground / Path ───────────────────────────────────────── */
-function Ground({ knifeRef }: { knifeRef: React.RefObject<KnifeState> }) {
-  const meshRef = useRef<THREE.Mesh>(null);
+/* ─── Hit Zone ───────────────────────────────────────────── */
 
-  useFrame(() => {
-    const m = meshRef.current;
-    const k = knifeRef.current;
-    if (!m || !k) return;
-    m.position.z = k.z;
-  });
-
-  return (
-    <mesh ref={meshRef} rotation={[-Math.PI / 2, 0, 0]} receiveShadow position={[0, 0, 0]}>
-      <planeGeometry args={[30, 200]} />
-      <meshStandardMaterial color="#3a7d44" />
-    </mesh>
-  );
-}
-
-/* ── Lane Lines ──────────────────────────────────────────── */
-function LaneLines({ knifeRef }: { knifeRef: React.RefObject<KnifeState> }) {
-  const groupRef = useRef<THREE.Group>(null);
-
-  useFrame(() => {
-    const g = groupRef.current;
-    const k = knifeRef.current;
-    if (!g || !k) return;
-    g.position.z = k.z;
-  });
-
-  return (
-    <group ref={groupRef}>
-      {[-5, -2.5, 0, 2.5, 5].map((x, i) => (
-        <mesh
-          key={i}
-          position={[x, 0.01, 0]}
-          rotation={[-Math.PI / 2, 0, 0]}
-        >
-          <planeGeometry args={[0.05, 200]} />
-          <meshStandardMaterial
-            color="#2d6b35"
-            transparent
-            opacity={0.5}
-          />
-        </mesh>
-      ))}
-    </group>
-  );
-}
-
-/* ── Score Popup ──────────────────────────────────────────── */
-function ScorePopups({
-  popups,
+function HitZone({
+  beatRef,
 }: {
-  popups: React.RefObject<
-    { id: number; x: number; y: number; z: number; text: string; color: string; time: number }[]
-  >;
+  beatRef: React.RefObject<number>;
 }) {
   const groupRef = useRef<THREE.Group>(null);
-  const spritesRef = useRef<Map<number, THREE.Sprite>>(new Map());
-  const canvasPool = useRef<Map<number, HTMLCanvasElement>>(new Map());
+
+  useFrame(() => {
+    const g = groupRef.current;
+    if (!g) return;
+    const beat = beatRef.current ?? 0;
+    g.scale.setScalar(1 + beat * 0.08);
+  });
+
+  return (
+    <group ref={groupRef} position={[0, HIT_ZONE_Y, 0]}>
+      {LANE_X.map((x, i) => {
+        const color = LANE_COLORS[i]!;
+        return (
+          <group key={i}>
+            <mesh position={[x, 0, 0]}>
+              <torusGeometry args={[0.65, 0.08, 8, 24]} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.8} />
+            </mesh>
+            <mesh position={[x, 0, 0]}>
+              <circleGeometry args={[0.5, 24]} />
+              <meshStandardMaterial
+                color={color}
+                emissive={color}
+                emissiveIntensity={0.3}
+                transparent
+                opacity={0.3}
+                side={THREE.DoubleSide}
+              />
+            </mesh>
+          </group>
+        );
+      })}
+      <mesh position={[0, -0.15, -0.4]}>
+        <boxGeometry args={[13, 0.25, 1.2]} />
+        <meshStandardMaterial color="#1a1a2e" emissive="#2a2a4e" emissiveIntensity={0.5} />
+      </mesh>
+    </group>
+  );
+}
+
+/* ─── Hit Effects ────────────────────────────────────────── */
+
+function HitEffects({ effectsRef }: { effectsRef: React.RefObject<HitEffect[]> }) {
+  const groupRef = useRef<THREE.Group>(null);
+  const spritesRef = useRef<Map<number, THREE.Group>>(new Map());
 
   useFrame((_state, dt) => {
     const g = groupRef.current;
-    const pops = popups.current;
-    if (!g || !pops) return;
+    const effects = effectsRef.current;
+    if (!g || !effects) return;
 
-    // Update existing
-    for (let i = pops.length - 1; i >= 0; i--) {
-      const p = pops[i]!;
-      p.time += dt;
-      p.y += dt * 2;
+    for (let i = effects.length - 1; i >= 0; i--) {
+      const e = effects[i]!;
+      e.timer -= dt;
+      e.y += dt * 2.5;
 
-      const sprite = spritesRef.current.get(p.id);
-      if (sprite) {
-        sprite.position.set(p.x, p.y, p.z);
-        const mat = sprite.material as THREE.SpriteMaterial;
-        mat.opacity = Math.max(0, 1 - p.time / 1.5);
+      const grp = spritesRef.current.get(e.id);
+      if (grp) {
+        grp.position.y = e.y;
+        const progress = 1 - e.timer / 0.8;
+        grp.scale.setScalar(1 + progress * 0.5);
+        grp.children.forEach((child) => {
+          const mesh = child as THREE.Mesh;
+          if (mesh.material) {
+            (mesh.material as THREE.MeshStandardMaterial).opacity = Math.max(0, e.timer / 0.8);
+          }
+        });
       }
 
-      if (p.time > 1.5) {
-        const s = spritesRef.current.get(p.id);
-        if (s) {
-          g.remove(s);
-          s.material.dispose();
-          spritesRef.current.delete(p.id);
-          canvasPool.current.delete(p.id);
-        }
-        pops.splice(i, 1);
+      if (e.timer <= 0) {
+        const dead = spritesRef.current.get(e.id);
+        if (dead) { g.remove(dead); spritesRef.current.delete(e.id); }
+        effects.splice(i, 1);
       }
     }
 
-    // Add new sprites
-    for (const p of pops) {
-      if (!spritesRef.current.has(p.id)) {
-        const canvas = document.createElement("canvas");
-        canvas.width = 128;
-        canvas.height = 64;
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.font = "bold 40px Manrope, sans-serif";
-          ctx.textAlign = "center";
-          ctx.fillStyle = p.color;
-          ctx.fillText(p.text, 64, 45);
-        }
-        const texture = new THREE.CanvasTexture(canvas);
-        const mat = new THREE.SpriteMaterial({
-          map: texture,
-          transparent: true,
-          depthTest: false,
-        });
-        const sprite = new THREE.Sprite(mat);
-        sprite.scale.set(2, 1, 1);
-        sprite.position.set(p.x, p.y, p.z);
-        g.add(sprite);
-        spritesRef.current.set(p.id, sprite);
-        canvasPool.current.set(p.id, canvas);
+    for (const e of effects) {
+      if (spritesRef.current.has(e.id)) continue;
+      const x = LANE_X[e.lane] ?? 0;
+      const color = e.quality === "perfect" ? "#ffd700" : e.quality === "good" ? "#4daaff" : "#ff4444";
+      const grp = new THREE.Group();
+      grp.position.set(x, e.y, 0.5);
+      for (let r = 0; r < 3; r++) {
+        const ring = new THREE.Mesh(
+          new THREE.TorusGeometry(0.3 + r * 0.3, 0.06, 6, 20),
+          new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 1, transparent: true, opacity: 0.9 })
+        );
+        ring.rotation.x = Math.PI / 2;
+        grp.add(ring);
       }
+      g.add(grp);
+      spritesRef.current.set(e.id, grp);
     }
   });
 
   return <group ref={groupRef} />;
 }
 
-/* ── Camera Follow ───────────────────────────────────────── */
-function CameraRig({ knifeRef }: { knifeRef: React.RefObject<KnifeState> }) {
-  const { camera } = useThree();
-  const smoothPos = useRef(new THREE.Vector3(0, 6, 8));
+/* ─── Background Stars ───────────────────────────────────── */
 
-  useFrame((_state, dt) => {
-    const k = knifeRef.current;
-    if (!k) return;
-
-    const targetX = k.x * 0.3;
-    const targetY = 6 + k.y * 0.3;
-    const targetZ = k.z + 8;
-
-    smoothPos.current.x += (targetX - smoothPos.current.x) * dt * 4;
-    smoothPos.current.y += (targetY - smoothPos.current.y) * dt * 4;
-    smoothPos.current.z += (targetZ - smoothPos.current.z) * dt * 6;
-
-    camera.position.copy(smoothPos.current);
-    camera.lookAt(k.x * 0.5, k.y + 1, k.z - 6);
-  });
-
-  return null;
-}
-
-/* ── Decorative Trees ────────────────────────────────────── */
-function Scenery({ knifeRef }: { knifeRef: React.RefObject<KnifeState> }) {
+function BackgroundStars() {
   const groupRef = useRef<THREE.Group>(null);
-  const treesRef = useRef<{ x: number; z: number; s: number; h: number }[]>([]);
+  const starsData = useRef<{ x: number; y: number; z: number; speed: number; phase: number }[]>([]);
 
-  // Generate initial trees
-  useMemo(() => {
-    const trees: { x: number; z: number; s: number; h: number }[] = [];
-    for (let i = 0; i < 60; i++) {
-      const side = Math.random() > 0.5 ? 1 : -1;
-      trees.push({
-        x: side * (8 + Math.random() * 12),
-        z: -i * 8 + Math.random() * 4,
-        s: 0.6 + Math.random() * 0.8,
-        h: 1.5 + Math.random() * 2,
+  if (starsData.current.length === 0) {
+    for (let i = 0; i < 80; i++) {
+      starsData.current.push({
+        x: (Math.random() - 0.5) * 30,
+        y: (Math.random() - 0.5) * 30,
+        z: -2 - Math.random() * 8,
+        speed: 0.3 + Math.random() * 0.7,
+        phase: Math.random() * Math.PI * 2,
       });
     }
-    treesRef.current = trees;
-  }, []);
+  }
 
-  useFrame(() => {
+  useFrame((state) => {
     const g = groupRef.current;
-    const k = knifeRef.current;
-    if (!g || !k) return;
-
-    // Recycle trees that are behind
-    for (const t of treesRef.current) {
-      if (t.z > k.z + 15) {
-        t.z -= 480;
-      }
-    }
+    if (!g) return;
+    const t = state.clock.elapsedTime;
+    g.children.forEach((child, i) => {
+      const d = starsData.current[i];
+      if (!d) return;
+      child.position.y = d.y + Math.sin(t * d.speed + d.phase) * 0.5;
+      child.scale.setScalar(0.5 + Math.sin(t * d.speed * 2 + d.phase) * 0.2);
+    });
   });
 
   return (
     <group ref={groupRef}>
-      {treesRef.current.map((t, i) => (
-        <group key={i} position={[t.x, 0, t.z]} scale={t.s}>
-          {/* Trunk */}
-          <mesh position={[0, t.h / 2, 0]} castShadow>
-            <cylinderGeometry args={[0.15, 0.2, t.h, 6]} />
-            <meshStandardMaterial color="#5a3825" />
-          </mesh>
-          {/* Foliage */}
-          <mesh position={[0, t.h + 0.5, 0]} castShadow>
-            <coneGeometry args={[1.2, 2.5, 8]} />
-            <meshStandardMaterial color="#1a5c2a" />
-          </mesh>
-          <mesh position={[0, t.h + 1.5, 0]} castShadow>
-            <coneGeometry args={[0.8, 1.8, 8]} />
-            <meshStandardMaterial color="#228B22" />
-          </mesh>
-        </group>
+      {starsData.current.map((d, i) => (
+        <mesh key={i} position={[d.x, d.y, d.z]}>
+          <boxGeometry args={[0.12, 0.12, 0.12]} />
+          <meshStandardMaterial color="#ffffff" emissive="#ffffff" emissiveIntensity={0.8} transparent opacity={0.5} />
+        </mesh>
       ))}
     </group>
   );
 }
 
-/* ── Particle System for Slice Effects ───────────────────── */
-function SliceParticles({
-  particlesRef,
-}: {
-  particlesRef: React.RefObject<
-    { x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; color: string }[]
-  >;
-}) {
-  const instanceRef = useRef<THREE.InstancedMesh>(null);
-  const dummy = useMemo(() => new THREE.Object3D(), []);
-  const MAX = 200;
+/* ─── Beat Light ─────────────────────────────────────────── */
+
+function BeatLight({ beatRef }: { beatRef: React.RefObject<number> }) {
+  const lightRef = useRef<THREE.PointLight>(null);
 
   useFrame((_state, dt) => {
-    const mesh = instanceRef.current;
-    const parts = particlesRef.current;
-    if (!mesh || !parts) return;
-
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const p = parts[i]!;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.z += p.vz * dt;
-      p.vy -= 15 * dt;
-      p.life -= dt;
-      if (p.life <= 0) {
-        parts.splice(i, 1);
-      }
-    }
-
-    for (let i = 0; i < MAX; i++) {
-      const p = parts[i];
-      if (p) {
-        dummy.position.set(p.x, p.y, p.z);
-        const s = p.life * 0.3;
-        dummy.scale.set(s, s, s);
-        dummy.updateMatrix();
-        mesh.setMatrixAt(i, dummy.matrix);
-      } else {
-        dummy.position.set(0, -100, 0);
-        dummy.scale.set(0, 0, 0);
-        dummy.updateMatrix();
-        mesh.setMatrixAt(i, dummy.matrix);
-      }
-    }
-    mesh.instanceMatrix.needsUpdate = true;
+    const light = lightRef.current;
+    if (!light) return;
+    if ((beatRef.current ?? 0) > 0) beatRef.current = Math.max(0, (beatRef.current ?? 0) - dt * 5);
+    light.intensity = 0.5 + (beatRef.current ?? 0) * 2.5;
   });
 
-  return (
-    <instancedMesh ref={instanceRef} args={[undefined, undefined, MAX]}>
-      <boxGeometry args={[0.15, 0.15, 0.15]} />
-      <meshStandardMaterial color="#ff6b6b" />
-    </instancedMesh>
-  );
+  return <pointLight ref={lightRef} position={[0, HIT_ZONE_Y + 2, 3]} color="#ffffff" intensity={0.5} distance={20} />;
 }
 
-/* ── Main Scene ──────────────────────────────────────────── */
-function Scene({ onScore, onDistance, onGameOver, onCombo }: GameProps) {
-  const knifeRef = useRef<KnifeState>(createKnife());
-  const targetsRef = useRef<SliceTarget[]>([]);
-  const scoreRef = useRef(0);
-  const comboRef = useRef(0);
-  const comboTimerRef = useRef(0);
-  const distRef = useRef(0);
-  const gameOverRef = useRef(false);
-  const jumpPressed = useRef(false);
-  const swipeRef = useRef<{ startX: number; startY: number; time: number } | null>(null);
-  const popupsRef = useRef<
-    { id: number; x: number; y: number; z: number; text: string; color: string; time: number }[]
-  >([]);
-  const particlesRef = useRef<
-    { x: number; y: number; z: number; vx: number; vy: number; vz: number; life: number; color: string }[]
-  >([]);
-  const popupId = useRef(0);
-  const speedMultiplier = useRef(1);
-  const livesRef = useRef(3);
-  const { play } = useGameSounds();
+/* ─── Note Animator ──────────────────────────────────────── */
 
-  // Input handlers
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (gameOverRef.current) return;
-      const k = knifeRef.current;
-      if (!k) return;
-      if (e.code === "Space" || e.code === "ArrowUp" || e.key === "w" || e.key === "W") {
-        e.preventDefault();
-        jumpPressed.current = true;
-      }
-      if (e.code === "ArrowLeft" || e.key === "a" || e.key === "A") {
-        e.preventDefault();
-        const idx = LANES.indexOf(k.targetX);
-        if (idx > 0) k.targetX = LANES[idx - 1]!;
-      }
-      if (e.code === "ArrowRight" || e.key === "d" || e.key === "D") {
-        e.preventDefault();
-        const idx = LANES.indexOf(k.targetX);
-        if (idx < LANES.length - 1) k.targetX = LANES[idx + 1]!;
-      }
-    };
+function NoteAnimator({
+  notesRef,
+  noteGroupsRef,
+}: {
+  notesRef: React.RefObject<BeatNote[]>;
+  noteGroupsRef: React.RefObject<Map<number, THREE.Group>>;
+}) {
+  useFrame((state) => {
+    const notes = notesRef.current;
+    const groups = noteGroupsRef.current;
+    if (!notes || !groups) return;
+    const t = state.clock.elapsedTime;
 
-    const handleTouchStart = (e: TouchEvent) => {
-      if (gameOverRef.current) return;
-      const touch = e.touches[0];
-      if (!touch) return;
-      swipeRef.current = { startX: touch.clientX, startY: touch.clientY, time: Date.now() };
-    };
-
-    const handleTouchEnd = (e: TouchEvent) => {
-      if (gameOverRef.current) return;
-      const touch = e.changedTouches[0];
-      const start = swipeRef.current;
-      if (!touch || !start) return;
-
-      const dx = touch.clientX - start.startX;
-      const dy = touch.clientY - start.startY;
-      const dt = Date.now() - start.time;
-      const k = knifeRef.current;
-      if (!k) return;
-
-      if (dt < 300 && Math.abs(dx) < 30 && Math.abs(dy) < 30) {
-        // Tap = jump
-        jumpPressed.current = true;
-      } else if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 30) {
-        // Horizontal swipe = lane change
-        const idx = LANES.indexOf(k.targetX);
-        if (dx < 0 && idx > 0) k.targetX = LANES[idx - 1]!;
-        if (dx > 0 && idx < LANES.length - 1) k.targetX = LANES[idx + 1]!;
-      } else if (dy < -30) {
-        // Swipe up = jump
-        jumpPressed.current = true;
-      }
-
-      swipeRef.current = null;
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("touchstart", handleTouchStart, { passive: true });
-    window.addEventListener("touchend", handleTouchEnd, { passive: true });
-
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("touchstart", handleTouchStart);
-      window.removeEventListener("touchend", handleTouchEnd);
-    };
-  }, []);
-
-  // Spawn particles on slice
-  const spawnSliceParticles = useCallback(
-    (x: number, y: number, z: number, color: string) => {
-      const parts = particlesRef.current;
-      if (!parts) return;
-      for (let i = 0; i < 12; i++) {
-        parts.push({
-          x,
-          y,
-          z,
-          vx: (Math.random() - 0.5) * 8,
-          vy: Math.random() * 6 + 2,
-          vz: (Math.random() - 0.5) * 8,
-          life: 0.8 + Math.random() * 0.5,
-          color,
+    for (const note of notes) {
+      const g = groups.get(note.id);
+      if (!g) continue;
+      g.position.y = note.y;
+      if (note.hit) {
+        g.scale.setScalar(Math.max(0, note.flashTimer / 0.5));
+        g.rotation.z += 0.15;
+      } else if (!note.missed) {
+        g.rotation.z = t * 2 + note.id * 0.7;
+        g.rotation.y = t * 1.5 + note.id * 0.5;
+        const glow = Math.max(0, 1 - Math.abs(note.y - HIT_ZONE_Y) / 4);
+        g.children.forEach((child) => {
+          const mat = (child as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+          if (mat?.emissiveIntensity !== undefined) mat.emissiveIntensity = 0.4 + glow * 1.2;
         });
       }
-    },
-    []
-  );
+    }
+  });
 
-  // Main game loop
-  useFrame((_state, dt) => {
-    if (gameOverRef.current) return;
+  return null;
+}
 
-    const clampedDt = Math.min(dt, 0.1);
+/* ─── Note Renderer ──────────────────────────────────────── */
 
-    // Update knife
-    const jumping = jumpPressed.current;
-    jumpPressed.current = false;
-    knifeRef.current = updateKnife(knifeRef.current, clampedDt, jumping);
+function NoteRenderer({
+  notesRef,
+  noteGroupsRef,
+}: {
+  notesRef: React.RefObject<BeatNote[]>;
+  noteGroupsRef: React.RefObject<Map<number, THREE.Group>>;
+}) {
+  const renderedIds = useRef<Set<number>>(new Set());
+  const groupRef = useRef<THREE.Group>(null);
 
-    const knife = knifeRef.current;
+  useFrame(() => {
+    const g = groupRef.current;
+    const notes = notesRef.current;
+    const groups = noteGroupsRef.current;
+    if (!g || !notes) return;
 
-    // Track distance
-    distRef.current = Math.abs(knife.z);
-    onDistance(Math.floor(distRef.current));
+    const currentIds = new Set(notes.map((n) => n.id));
 
-    // Speed increases with distance
-    speedMultiplier.current = 1 + distRef.current * 0.001;
-
-    // Combo timer
-    if (comboRef.current > 0) {
-      comboTimerRef.current -= clampedDt;
-      if (comboTimerRef.current <= 0) {
-        comboRef.current = 0;
-        onCombo(0);
+    for (const id of renderedIds.current) {
+      if (!currentIds.has(id)) {
+        const existing = groups.get(id);
+        if (existing) { g.remove(existing); groups.delete(id); }
+        renderedIds.current.delete(id);
       }
     }
 
-    // Spawn targets
-    targetsRef.current = spawnTargets(
-      targetsRef.current,
-      knife.z,
-      speedMultiplier.current
-    );
+    for (const note of notes) {
+      if (renderedIds.current.has(note.id)) continue;
+      const color = LANE_COLORS[note.colorIdx % LANE_COLORS.length]!;
+      const x = LANE_X[note.lane] ?? 0;
+      const noteGroup = new THREE.Group();
+      noteGroup.position.set(x, note.y, 0);
 
-    // Check collisions
-    for (const target of targetsRef.current) {
-      if (target.sliced) continue;
-      if (checkSlice(knife, target)) {
-        target.sliced = true;
-        target.sliceAnim = 0;
+      noteGroup.add(new THREE.Mesh(
+        new THREE.SphereGeometry(0.55, 12, 12),
+        new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.6, transparent: true, opacity: 0.25 })
+      ));
 
-        const points = TARGET_POINTS[target.type];
+      const starMat = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.4 });
+      noteGroup.add(new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.25), starMat));
 
-        if (target.type === "bomb") {
-          // Hit a bomb!
-          livesRef.current -= 1;
-          play("error");
-          spawnSliceParticles(target.x, target.y, target.z, "#ff4444");
-          popupsRef.current.push({
-            id: popupId.current++,
-            x: target.x,
-            y: target.y + 1,
-            z: target.z,
-            text: "BOMB! 💥",
-            color: "#ff4444",
-            time: 0,
-          });
-          comboRef.current = 0;
-          onCombo(0);
+      const box2 = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.22), starMat.clone());
+      box2.rotation.z = Math.PI / 4;
+      noteGroup.add(box2);
 
-          if (livesRef.current <= 0) {
-            gameOverRef.current = true;
-            onGameOver();
-            return;
-          }
-        } else {
-          // Good slice!
+      noteGroup.add(new THREE.Mesh(
+        new THREE.SphereGeometry(0.18, 8, 8),
+        new THREE.MeshStandardMaterial({ color: "#ffffff", emissive: "#ffffff", emissiveIntensity: 1.5 })
+      ));
+
+      g.add(noteGroup);
+      groups.set(note.id, noteGroup);
+      renderedIds.current.add(note.id);
+    }
+  });
+
+  return <group ref={groupRef} />;
+}
+
+/* ─── Game Loop ──────────────────────────────────────────── */
+
+function GameLoop({
+  bpm,
+  level,
+  songDuration,
+  onScore,
+  onCombo,
+  onHit,
+  onGameOver,
+  laneFlashRef,
+  beatRef,
+  effectsRef,
+  notesRef,
+  laneHitRef,
+}: {
+  bpm: number;
+  level: number;
+  songDuration: number;
+  onScore: (s: number) => void;
+  onCombo: (c: number) => void;
+  onHit: (q: HitQuality) => void;
+  onGameOver: (stars: number, acc: number) => void;
+  laneFlashRef: React.RefObject<number[]>;
+  beatRef: React.RefObject<number>;
+  effectsRef: React.RefObject<HitEffect[]>;
+  notesRef: React.RefObject<BeatNote[]>;
+  laneHitRef: React.RefObject<boolean[]>;
+}) {
+  const songTimeRef = useRef(0);
+  const scoreRef = useRef(0);
+  const comboRef = useRef(0);
+  const totalNotesRef = useRef(0);
+  const hitNotesRef = useRef(0);
+  const effectIdRef = useRef(0);
+  const doneRef = useRef(false);
+  const lastBeatRef = useRef(-1);
+
+  useFrame((_state, dt) => {
+    if (doneRef.current) return;
+    const clampedDt = Math.min(dt, 0.05);
+    songTimeRef.current += clampedDt;
+    const songTime = songTimeRef.current;
+    const speed = fallSpeed(level);
+
+    // Beat pulse
+    const beatInterval = 60 / bpm;
+    const currentBeat = Math.floor(songTime / beatInterval);
+    if (currentBeat !== lastBeatRef.current) {
+      lastBeatRef.current = currentBeat;
+      beatRef.current = 1;
+    }
+
+    // Generate + update notes
+    notesRef.current = generateNotes(notesRef.current, bpm, level, songTime);
+    const updatedNotes: BeatNote[] = [];
+    for (const note of notesRef.current) {
+      const updated = updateNote(note, clampedDt, speed);
+      if (!note.missed && updated.missed) {
+        totalNotesRef.current += 1;
+        comboRef.current = 0;
+        onCombo(0);
+        onHit("miss");
+      }
+      if (updated.hit) updated.flashTimer = Math.max(0, updated.flashTimer - clampedDt);
+      updatedNotes.push(updated);
+    }
+    notesRef.current = cleanupNotes(updatedNotes);
+
+    // Process hits
+    const laneHits = laneHitRef.current;
+    if (laneHits) {
+      for (let lane = 0; lane < LANE_COUNT; lane++) {
+        if (!laneHits[lane]) continue;
+        laneHits[lane] = false;
+        const { notes: newNotes, quality } = tryHit(notesRef.current, lane);
+        notesRef.current = newNotes;
+        if (quality) {
+          totalNotesRef.current += 1;
+          hitNotesRef.current += 1;
           comboRef.current += 1;
-          comboTimerRef.current = 2;
-          onCombo(comboRef.current);
-
-          const multiplier = Math.min(comboRef.current, 5);
-          const earned = points * multiplier;
-          scoreRef.current += earned;
+          const pts = POINTS[quality] * comboMultiplier(comboRef.current);
+          scoreRef.current += pts;
           onScore(scoreRef.current);
-
-          play("score");
-          spawnSliceParticles(
-            target.x,
-            target.y,
-            target.z,
-            TARGET_COLORS[target.type].inner
-          );
-
-          const comboText =
-            multiplier > 1 ? ` x${multiplier}` : "";
-          popupsRef.current.push({
-            id: popupId.current++,
-            x: target.x,
-            y: target.y + 1,
-            z: target.z,
-            text: `+${earned}${comboText}`,
-            color: multiplier >= 3 ? "#ffd700" : "#ffffff",
-            time: 0,
-          });
+          onCombo(comboRef.current);
+          onHit(quality);
+          if (laneFlashRef.current) laneFlashRef.current[lane] = 1;
+          effectsRef.current.push({ id: effectIdRef.current++, lane, quality, timer: 0.8, y: HIT_ZONE_Y });
         }
       }
     }
 
-    // Cleanup
-    targetsRef.current = cleanupTargets(targetsRef.current, knife.z);
+    // End
+    if (songTime >= songDuration) {
+      doneRef.current = true;
+      const acc = hitNotesRef.current / Math.max(1, totalNotesRef.current);
+      onGameOver(starRating(acc), acc);
+    }
   });
 
-  // Render targets
-  const targets = targetsRef.current;
-
-  return (
-    <>
-      <CameraRig knifeRef={knifeRef} />
-
-      {/* Lighting */}
-      <ambientLight intensity={0.5} />
-      <directionalLight
-        position={[5, 15, 10]}
-        intensity={1.2}
-        castShadow
-        shadow-mapSize-width={1024}
-        shadow-mapSize-height={1024}
-        shadow-camera-far={100}
-        shadow-camera-left={-20}
-        shadow-camera-right={20}
-        shadow-camera-top={20}
-        shadow-camera-bottom={-20}
-      />
-
-      {/* Sky color */}
-      <fog attach="fog" args={["#87CEEB", 30, 80]} />
-
-      {/* Ground */}
-      <Ground knifeRef={knifeRef} />
-      <LaneLines knifeRef={knifeRef} />
-
-      {/* Scenery */}
-      <Scenery knifeRef={knifeRef} />
-
-      {/* Knife */}
-      <KnifeMesh knifeRef={knifeRef} />
-
-      {/* Targets */}
-      {targets.map((t) => (
-        <TargetMesh key={t.id} target={t} />
-      ))}
-
-      {/* Score Popups */}
-      <ScorePopups popups={popupsRef} />
-
-      {/* Particles */}
-      <SliceParticles particlesRef={particlesRef} />
-    </>
-  );
+  return null;
 }
 
-/* ── Exported Game component ─────────────────────────────── */
-export function Game({ onScore, onDistance, onGameOver, onCombo }: GameProps) {
+/* ─── Exported Game Component ────────────────────────────── */
+
+export function Game({ bpm, level, songDuration, onScore, onCombo, onHit, onGameOver }: GameProps) {
+  const laneFlashRef = useRef<number[]>([0, 0, 0, 0]);
+  const beatRef = useRef<number>(0);
+  const effectsRef = useRef<HitEffect[]>([]);
+  const notesRef = useRef<BeatNote[]>([]);
+  const noteGroupsRef = useRef<Map<number, THREE.Group>>(new Map());
+  const laneHitRef = useRef<boolean[]>([false, false, false, false]);
+
+  useEffect(() => {
+    const keyMap: Record<string, number> = {
+      d: 0, D: 0, ArrowLeft: 0,
+      f: 1, F: 1, ArrowDown: 1,
+      j: 2, J: 2, ArrowUp: 2,
+      k: 3, K: 3, ArrowRight: 3,
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const lane = keyMap[e.key];
+      if (lane !== undefined) { e.preventDefault(); laneHitRef.current[lane] = true; }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  const handleLaneTap = useCallback((lane: number) => {
+    laneHitRef.current[lane] = true;
+  }, []);
+
   return (
-    <div className="w-full h-full">
-      <Canvas
-        shadows
-        gl={{ antialias: true }}
-        camera={{ position: [0, 6, 8], fov: 60 }}
-        style={{ background: "linear-gradient(180deg, #87CEEB 0%, #b8e6ff 100%)" }}
-      >
-        <Scene
-          onScore={onScore}
-          onDistance={onDistance}
-          onGameOver={onGameOver}
-          onCombo={onCombo}
-        />
-      </Canvas>
+    <div className="w-full h-full flex flex-col">
+      <div className="flex-1 relative">
+        <Canvas
+          camera={{ position: [0, 0, 18], fov: 55 }}
+          style={{ background: "linear-gradient(180deg, #0a0a1a 0%, #1a0a2e 50%, #0a1a2e 100%)" }}
+        >
+          {/* Lighting */}
+          <ambientLight intensity={0.4} color="#8888ff" />
+          <directionalLight position={[0, 10, 5]} intensity={0.8} />
+          <directionalLight position={[0, -5, 5]} intensity={0.3} color="#aaaaff" />
+          <BeatLight beatRef={beatRef} />
+
+          {/* Scene */}
+          <BackgroundStars />
+          <LaneTracks flashRef={laneFlashRef} />
+          <HitZone beatRef={beatRef} />
+          <HitEffects effectsRef={effectsRef} />
+          <NoteRenderer notesRef={notesRef} noteGroupsRef={noteGroupsRef} />
+          <NoteAnimator notesRef={notesRef} noteGroupsRef={noteGroupsRef} />
+
+          {/* Logic */}
+          <GameLoop
+            bpm={bpm}
+            level={level}
+            songDuration={songDuration}
+            onScore={onScore}
+            onCombo={onCombo}
+            onHit={onHit}
+            onGameOver={onGameOver}
+            laneFlashRef={laneFlashRef}
+            beatRef={beatRef}
+            effectsRef={effectsRef}
+            notesRef={notesRef}
+            laneHitRef={laneHitRef}
+          />
+        </Canvas>
+      </div>
+
+      {/* Touch buttons */}
+      <div className="flex w-full" style={{ height: "80px", flexShrink: 0 }}>
+        {([0, 1, 2, 3] as const).map((lane) => {
+          const color = LANE_COLORS[lane]!;
+          const labels = ["D", "F", "J", "K"];
+          return (
+            <button
+              key={lane}
+              onPointerDown={() => handleLaneTap(lane)}
+              className="flex-1 flex items-center justify-center font-bold text-lg select-none active:scale-95 transition-transform"
+              style={{
+                background: `${color}22`,
+                borderTop: `3px solid ${color}`,
+                color,
+                touchAction: "manipulation",
+                minHeight: "44px",
+                fontFamily: "Manrope, sans-serif",
+              }}
+            >
+              {labels[lane]}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

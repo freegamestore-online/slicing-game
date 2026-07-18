@@ -5,6 +5,7 @@
 :root {
   /* Neutrals */
   --paper: #ffffff;
+  --bg: #ffffff;
   --ink: #1a1a1a;
   --muted: #6b7280;
   --line: #e5e7eb;
@@ -28,6 +29,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --paper: #0f0f0f;
+    --bg: #0f0f0f;
     --ink: #f5f5f5;
     --muted: #9ca3af;
     --line: #2d2d2d;
@@ -46,7 +48,7 @@ html { height: 100%; overflow: hidden; }
 
 body {
   margin: 0;
-  background: var(--paper);
+  background: var(--bg);
   color: var(--ink);
 }
 
