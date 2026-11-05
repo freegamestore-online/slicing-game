@@ -257,7 +257,6 @@ function SongSelect({
 /* ─── HUD overlay ────────────────────────────────────────── */
 
 function HUD({
-  score,
   combo,
   lastHit,
   timeLeft,
